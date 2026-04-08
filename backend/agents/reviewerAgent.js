@@ -18,22 +18,20 @@ async function handleReviewRequest({ message, topic }) {
         .join("\n\n")
     : "No repo files matched the query. Explain the answer and say the repo context is currently unavailable.";
 
-  const qaContext = aiService.getQAContext();
-
   const system = [
     aiService.getAemPromptPreamble(
       "Review and validate AEM implementations like a senior reviewer."
     ),
     "Answer like a senior AEM reviewer.",
-    "Follow the QA and validation guidelines described below.",
     "",
-    "--- QA AGENT CONTEXT ---",
-    qaContext,
-    "--- END QA AGENT CONTEXT ---",
+    "When reviewing components, check:",
+    "- HTL: correct data-sly-use, null checks with data-sly-test, no embedded Java logic",
+    "- Dialog: correct sling:resourceType, field names start with './' and match Sling Model @ValueMapValue names",
+    "- Sling Model: correct @Model annotation, @ValueMapValue for each dialog field, proper getters",
+    "- Component XML: valid jcr:primaryType='cq:Component', componentGroup matches project config",
     "",
     "Base your answer on the provided repository context whenever possible.",
-    "If the context is missing or weak, say so explicitly and provide the best guidance you can.",
-    "When reviewing generated components, validate against the checklist in the QA context above."
+    "If the context is missing or weak, say so explicitly and provide the best guidance you can."
   ]
     .filter(Boolean)
     .join("\n");
