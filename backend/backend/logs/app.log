@@ -1,0 +1,12 @@
+[2026-04-06T05:21:23.614Z] [WARN] Repo indexing skipped during startup: ENOENT: no such file or directory, open '/Users/pradeep/Desktop/Code/aem-trainer/backend/config/repo-index.json'
+[2026-04-06T05:21:23.616Z] [INFO] AEM AI Trainer backend listening on port 4000
+[2026-04-06T05:22:24.626Z] [WARN] Repo indexing skipped during startup: ENOENT: no such file or directory, open '/Users/pradeep/Desktop/Code/aem-trainer/backend/config/repo-index.json'
+[2026-04-06T05:22:24.627Z] [INFO] AEM AI Trainer backend listening on port 4000
+[2026-04-06T05:23:55.078Z] [WARN] Repo indexing skipped during startup: ENOENT: no such file or directory, open '/Users/pradeep/Desktop/Code/aem-trainer/backend/config/repo-index.json'
+[2026-04-06T05:23:55.080Z] [INFO] AEM AI Trainer backend listening on port 4000
+[2026-04-06T05:28:48.600Z] [INFO] Executing command {"resolvedCommand":"mvn clean install"}
+[2026-04-06T05:29:52.958Z] [WARN] Repo indexing skipped during startup: ENOENT: no such file or directory, open '/Users/pradeep/Desktop/Code/aem-trainer/backend/config/repo-index.json'
+[2026-04-06T05:29:52.963Z] [INFO] AEM AI Trainer backend listening on port 4000
+[2026-04-06T05:29:57.940Z] [WARN] Repo indexing skipped during startup: ENOENT: no such file or directory, open '/Users/pradeep/Desktop/Code/aem-trainer/backend/config/repo-index.json'
+[2026-04-06T05:29:57.942Z] [INFO] AEM AI Trainer backend listening on port 4000
+[2026-04-06T05:30:05.262Z] [INFO] Executing command {"resolvedCommand":"mvn clean install"}

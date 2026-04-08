@@ -1,0 +1,10 @@
+{
+  "appTitle": "Deloitte AEM Labs",
+  "appId": "dlabs",
+  "groupId": "com.deloitte.aemlabs",
+  "aemVersion": "6.5.8",
+  "archetypeVersion": "56",
+  "frontendModule": "general",
+  "includeDispatcherConfig": "n",
+  "configured": true
+}
