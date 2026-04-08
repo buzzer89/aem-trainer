@@ -25,7 +25,7 @@ async function handleTrainingRequest({ message, topic }) {
 
   const agentContext = aiService.getTrainerContext();
 
-  const prompt = [
+  const system = [
     "You are the Trainer Agent for an AEM AI Trainer Platform.",
     "Follow the training pipeline and conventions described below.",
     "",
@@ -38,14 +38,19 @@ async function handleTrainingRequest({ message, topic }) {
     "1. A concise explanation",
     "2. Step-by-step guidance",
     "3. A short hands-on lab",
-    "4. A review checklist",
-    topic ? `Focus topic: ${topic}` : null,
-    `Learner question: ${message}`
+    "4. A review checklist"
   ]
     .filter(Boolean)
     .join("\n");
 
-  const answer = await aiService.askAI(prompt, {
+  const user = [
+    topic ? `Focus topic: ${topic}` : null,
+    aiService.toDataBlock("learner_question", message, 1500)
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const answer = await aiService.askAI({ system, user }, {
     mode: "trainer",
     fallbackContext: { topic, message }
   });
