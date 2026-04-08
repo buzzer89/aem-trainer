@@ -26,7 +26,9 @@ async function handleTrainingRequest({ message, topic }) {
   const agentContext = aiService.getTrainerContext();
 
   const system = [
-    "You are the Trainer Agent for an AEM AI Trainer Platform.",
+    aiService.getAemPromptPreamble(
+      "Teach the trainee with practical, production-ready AEM guidance."
+    ),
     "Follow the training pipeline and conventions described below.",
     "",
     "--- AGENT CONTEXT ---",
@@ -61,6 +63,12 @@ async function handleTrainingRequest({ message, topic }) {
 async function handleBuildRequest({ message, topic }) {
   const prompt = aiService.buildComponentPrompt({ message, topic });
   const result = await aiService.askAIForComponentFiles(prompt);
+
+  if (result.needsClarification) {
+    return {
+      answer: result.question
+    };
+  }
 
   const { taskId, results: fileResults } = fileWriterService.writeFiles(result.files, message);
 

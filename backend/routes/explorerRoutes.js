@@ -148,7 +148,9 @@ router.post("/explain", async (req, res, next) => {
     const ext = path.extname(filePath);
 
     const system = [
-      "You are the Trainer Agent for an AEM AI Trainer Platform.",
+      aiService.getAemPromptPreamble(
+        "Explain AEM source files clearly for a trainee."
+      ),
       "A trainee clicked on a file in the project explorer and wants to understand it.",
       "",
       "Explain this file clearly for someone learning AEM:",

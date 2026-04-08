@@ -77,6 +77,38 @@ const AGENTS_DIR = path.join(__dirname, "..", "agents");
 
 const agentContextCache = {};
 
+function getPromptProjectContext() {
+  const config = projectConfigService.get();
+  return [
+    "Project context (set before generation):",
+    `- AEM version: ${process.env.AEM_VERSION || "{{AEM_VERSION}}"}`,
+    `- Core Components version: ${process.env.CORE_COMPONENTS_VERSION || "{{CORE_COMPONENTS_VERSION}}"}`,
+    `- Java / JDK: ${process.env.JAVA_VERSION || "{{JAVA_VERSION}}"}`,
+    `- Maven coordinates: groupId=${config.groupId || "{{GROUP_ID}}"}, artifactId=${config.artifactId || "{{ARTIFACT_ID}}"}`,
+    `- Run modes: ${process.env.AEM_RUNMODES || "{{runmodes}}"}`,
+    `- Component repo path: /apps/${config.appId || "{{projectName}}"}/components`,
+    `- Content base path: /content/${config.appId || "{{website}}"}/...`
+  ].join("\n");
+}
+
+function getAemPromptPreamble(taskLine) {
+  return [
+    "You are an expert AEM developer and code generator.",
+    taskLine,
+    "If any required detail is missing, ask one clarifying question before generating code.",
+    "",
+    getPromptProjectContext(),
+    "",
+    "General rules & constraints:",
+    "- Do not use deprecated AEM/Sling APIs for the target version.",
+    "- Keep business logic in Java/OSGi services; HTL is presentation-only.",
+    "- Use Sling Models and OSGi Declarative Services annotations.",
+    "- Never use admin sessions; use service user mappings for system access.",
+    "- Do not hardcode secrets or credentials.",
+    "- Follow secure coding, accessibility, and performance best practices."
+  ].join("\n");
+}
+
 function loadAgentContext(filename) {
   if (agentContextCache[filename]) {
     return agentContextCache[filename];
@@ -412,9 +444,13 @@ function buildComponentPrompt({ message, topic, repoContext }) {
   const { folderName, className, jcrTitle } = sanitizeComponentName(message);
 
   const system = [
-    "You are the Builder Agent for an AEM AI Trainer Platform.",
-    "The user wants to create or scaffold an AEM component in their project.",
-    "Follow the training pipeline and code generation rules described below.",
+    getAemPromptPreamble(
+      "Generate the requested AEM component/feature/code following strict conventions and best practices."
+    ),
+    "Primary goals:",
+    "1. Produce maintainable, testable, secure, and performant AEM code.",
+    "2. Reuse Core Components where possible; extend only when needed.",
+    "3. Provide component artifacts, dialogs, HTL, clientlibs, Sling Model, tests, and concise README notes.",
     "",
     "--- AGENT CONTEXT ---",
     agentContext,
@@ -454,12 +490,18 @@ function buildComponentPrompt({ message, topic, repoContext }) {
     "- Sling Model: package " + javaPackage + ".models; @Model(adaptables=Resource.class, defaultInjectionStrategy=DefaultInjectionStrategy.OPTIONAL), use @ValueMapValue for properties",
     "- Java class declaration: public class " + className + "Model { ... }",
     "",
-    "Respond with ONLY valid JSON (no markdown fences, no extra text) in this exact format:",
+    "Delivery format for this API (STRICT):",
+    "- Return ONLY valid JSON (no markdown fences, no extra text).",
+    "- If required details are missing, return: {\"needsClarification\":true,\"question\":\"...\"}.",
+    "- Otherwise return the file payload format below.",
+    "",
+    "JSON response format:",
     '{',
     '  "explanation": "Markdown explanation of what was created and next steps",',
     '  "files": [',
     '    { "path": "relative/path/from/project/root", "content": "file content" }',
-    '  ]',
+    '  ],',
+    '  "readme": "Short maintainer notes (optional)"',
     '}',
     "",
     "Generate all necessary files: .content.xml, HTL template, _cq_dialog/.content.xml, and Sling Model .java file.",
@@ -517,6 +559,13 @@ function validateBuilderResponse(parsed) {
     throw new Error("Builder response must be a JSON object");
   }
 
+  if (parsed.needsClarification === true) {
+    if (!parsed.question || typeof parsed.question !== "string") {
+      throw new Error("Clarification response must include a question");
+    }
+    return;
+  }
+
   if (!Array.isArray(parsed.files) || parsed.files.length === 0) {
     throw new Error("Builder response must include a non-empty files array");
   }
@@ -546,6 +595,9 @@ async function askAIForComponentFiles(prompt) {
       }
       const parsed = JSON.parse(jsonMatch[0]);
       validateBuilderResponse(parsed);
+      if (parsed.needsClarification) {
+        return parsed;
+      }
       // Always sanitize and validate the component name
       let aiName = "";
       if (parsed.componentName && typeof parsed.componentName === "string") {
@@ -590,5 +642,6 @@ module.exports = {
   askAIForComponentFiles,
   getTrainerContext,
   getQAContext,
-  toDataBlock
+  toDataBlock,
+  getAemPromptPreamble
 };

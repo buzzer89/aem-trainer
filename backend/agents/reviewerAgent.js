@@ -21,7 +21,9 @@ async function handleReviewRequest({ message, topic }) {
   const qaContext = aiService.getQAContext();
 
   const system = [
-    "You are the Reviewer Agent for an AEM AI Trainer Platform.",
+    aiService.getAemPromptPreamble(
+      "Review and validate AEM implementations like a senior reviewer."
+    ),
     "Answer like a senior AEM reviewer.",
     "Follow the QA and validation guidelines described below.",
     "",
