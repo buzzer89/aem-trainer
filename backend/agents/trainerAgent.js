@@ -8,6 +8,11 @@ const BUILD_KEYWORDS = [
   "scaffold",
   "generate",
   "make",
+  "update",
+  "modify",
+  "enhance",
+  "refactor",
+  "fix",
   "add a component",
   "add component",
   "new component"
@@ -15,7 +20,9 @@ const BUILD_KEYWORDS = [
 
 function isBuildRequest(message) {
   const lower = message.toLowerCase();
-  return BUILD_KEYWORDS.some((keyword) => lower.includes(keyword));
+  return BUILD_KEYWORDS.some((keyword) => lower.includes(keyword))
+    || /(update|modify|enhance|refactor|fix)\s+.*component/i.test(message)
+    || /component\s+.*(update|modify|enhance|refactor|fix)/i.test(message);
 }
 
 async function handleTrainingRequest({ message, topic }) {

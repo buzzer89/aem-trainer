@@ -287,6 +287,7 @@ async function askAI(prompt, options = {}) {
 function sanitizeComponentName(rawName) {
   const stopWords = [
     "create", "build", "scaffold", "generate", "make", "add", "new",
+    "update", "modify", "enhance", "refactor", "fix", "edit", "extend",
     "component", "with", "below", "above", "following", "features",
     "and", "the", "a", "an", "for", "that", "has", "having", "including",
     "please", "i", "want", "need", "like", "would", "which", "who", "whose", "whom", "where", "when", "why", "how"
@@ -313,6 +314,21 @@ function sanitizeComponentName(rawName) {
     className,
     jcrTitle
   };
+}
+
+function inferComponentIntent(message) {
+  const input = String(message || "");
+  const lower = input.toLowerCase();
+  const isUpdate = /(update|modify|enhance|refactor|fix|edit|extend)\b/.test(lower);
+  const isCreate = /(create|build|scaffold|generate|make|add|new)\b/.test(lower);
+  const mode = isUpdate && !isCreate ? "update" : "create";
+
+  const namedMatch = input.match(/component(?:\s+named)?\s+([a-zA-Z][a-zA-Z0-9-_]*)/i);
+  const trailingMatch = input.match(/\b([a-zA-Z][a-zA-Z0-9-_]*)\s+component\b/i);
+  const explicitName = namedMatch?.[1] || trailingMatch?.[1] || input;
+  const naming = sanitizeComponentName(explicitName);
+
+  return { mode, ...naming };
 }
 
 function createMockBuilderResponse(componentName) {
@@ -441,7 +457,8 @@ function buildComponentPrompt({ message, topic, repoContext }) {
   const componentGroup = projectConfigService.getComponentGroup();
   const agentContext = getTrainerContext();
 
-  const { folderName, className, jcrTitle } = sanitizeComponentName(message);
+  const intent = inferComponentIntent(message);
+  const { mode, folderName, className, jcrTitle } = intent;
 
   const system = [
     getAemPromptPreamble(
@@ -456,8 +473,12 @@ function buildComponentPrompt({ message, topic, repoContext }) {
     agentContext,
     "--- END AGENT CONTEXT ---",
     "",
+    mode === "update"
+      ? "You are updating an existing component. Keep existing resourceType and naming unless user explicitly requests a rename."
+      : "You are creating a new component using the naming below.",
+    "",
     "==========================================================",
-    "MANDATORY: USE THESE EXACT NAMES (already derived for you)",
+    "USE THESE DERIVED NAMES",
     "==========================================================",
     "",
     `Component folder name: ${folderName}`,
@@ -472,7 +493,7 @@ function buildComponentPrompt({ message, topic, repoContext }) {
     `  - Sling Model:      ${modelsPath}/${className}Model.java`,
     `  - Test page:        ui.content/src/main/content/jcr_root/content/${config.appId}/us/en/trainer-test-${folderName}/.content.xml`,
     "",
-    "DO NOT rename or modify these names. They are pre-validated.",
+    "Prefer these names exactly to avoid mismatched paths/classes.",
     "==========================================================",
     "",
     "Project details:",
@@ -516,6 +537,7 @@ function buildComponentPrompt({ message, topic, repoContext }) {
   const user = [
     topic ? `Focus topic: ${topic}` : null,
     `User request: ${message}`,
+    `Operation mode: ${mode}`,
     toDataBlock("user_request", message, 1200),
     repoContext ? toDataBlock("repository_context", repoContext, 4000) : null
   ]
@@ -609,9 +631,7 @@ async function askAIForComponentFiles(prompt) {
       }
       if (!aiName) {
         const userRequest = extractUserRequest(prompt);
-        aiName = userRequest
-          ? userRequest.replace(/^(create|build|scaffold|make|generate)\s+(a\s+|an\s+|the\s+)?/i, "").replace(/\s+component$/i, "").trim()
-          : "sample";
+        aiName = inferComponentIntent(userRequest || "sample").folderName;
       }
       const { folderName, className } = sanitizeComponentName(aiName);
       // Rewrite all file paths and class names in the response
@@ -629,9 +649,7 @@ async function askAIForComponentFiles(prompt) {
   }
   // fallback: sanitize name from prompt
   const userRequest = extractUserRequest(prompt);
-  const componentName = userRequest
-    ? userRequest.replace(/^(create|build|scaffold|make|generate)\s+(a\s+|an\s+|the\s+)?/i, "").replace(/\s+component$/i, "").trim()
-    : "sample";
+  const componentName = inferComponentIntent(userRequest || "sample").folderName;
   const { className } = sanitizeComponentName(componentName);
   return createMockBuilderResponse(className);
 }
