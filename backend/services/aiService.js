@@ -5,31 +5,139 @@ if (process.env.OPENAI_API_KEY) {
   openaiApi = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 }
 
+function truncateText(value, max = 6000) {
+  if (!value) return "";
+  const asString = String(value);
+  return asString.length <= max ? asString : `${asString.slice(0, max)}\n...[truncated]`;
+}
+
+function toDataBlock(label, value, max = 6000) {
+  return [
+    `<${label}>`,
+    truncateText(value, max),
+    `</${label}>`
+  ].join("\n");
+}
+
+function normalizePrompt(prompt) {
+  if (typeof prompt === "string") {
+    return {
+      system: "",
+      user: prompt,
+      text: prompt,
+      openAIMessages: [{ role: "user", content: prompt }]
+    };
+  }
+
+  const system = prompt?.system ? String(prompt.system) : "";
+  const user = prompt?.user ? String(prompt.user) : "";
+  const text = system
+    ? `System Instructions:\n${system}\n\nUser Input:\n${user}`
+    : user;
+  const openAIMessages = [];
+
+  if (system) {
+    openAIMessages.push({ role: "system", content: system });
+  }
+  openAIMessages.push({ role: "user", content: user });
+
+  return { system, user, text, openAIMessages };
+}
+
+function extractUserRequest(prompt) {
+  const promptText = normalizePrompt(prompt).text;
+  const userRequestMatch = promptText.match(/User request:\s*(.+)/i);
+  return userRequestMatch ? userRequestMatch[1].trim() : "";
+}
+
 async function askWithOpenAI(prompt) {
   if (!openaiApi) throw new Error("OpenAI API key not set");
   const model = process.env.OPENAI_MODEL || "gpt-4";
+  const normalized = normalizePrompt(prompt);
   const res = await openaiApi.chat.completions.create({
     model,
-    messages: [{ role: "user", content: prompt }],
+    messages: normalized.openAIMessages,
     temperature: 0.2
   });
   return res.choices[0].message.content.trim();
 }
-const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
-const util = require("util");
 
 const appConfig = require("../../config/default");
 const topics = require("../../config/topics");
 const projectConfigService = require("./projectConfigService");
 const logger = require("./logger");
 
-const execFileAsync = util.promisify(execFile);
+/**
+ * Extract the first balanced JSON object from a string.
+ * Handles markdown fences, trailing text, and nested braces.
+ */
+function extractJSON(raw) {
+  const stripped = raw.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "");
+  const start = stripped.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+
+  for (let i = start; i < stripped.length; i++) {
+    const ch = stripped[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"' && !escape) { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(stripped.slice(start, i + 1));
+        } catch (e) {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
 
 const AGENTS_DIR = path.join(__dirname, "..", "agents");
 
 const agentContextCache = {};
+
+function getPromptProjectContext() {
+  const config = projectConfigService.get();
+  return [
+    "Project context (set before generation):",
+    `- AEM version: ${process.env.AEM_VERSION || "{{AEM_VERSION}}"}`,
+    `- Core Components version: ${process.env.CORE_COMPONENTS_VERSION || "{{CORE_COMPONENTS_VERSION}}"}`,
+    `- Java / JDK: ${process.env.JAVA_VERSION || "{{JAVA_VERSION}}"}`,
+    `- Maven coordinates: groupId=${config.groupId || "{{GROUP_ID}}"}, artifactId=${config.artifactId || "{{ARTIFACT_ID}}"}`,
+    `- Run modes: ${process.env.AEM_RUNMODES || "{{runmodes}}"}`,
+    `- Component repo path: /apps/${config.appId || "{{projectName}}"}/components`,
+    `- Content base path: /content/${config.appId || "{{website}}"}/...`
+  ].join("\n");
+}
+
+function getAemPromptPreamble(taskLine) {
+  return [
+    "You are an expert AEM developer and code generator.",
+    taskLine,
+    "If any required detail is missing, ask one clarifying question before generating code.",
+    "",
+    getPromptProjectContext(),
+    "",
+    "General rules & constraints:",
+    "- Do not use deprecated AEM/Sling APIs for the target version.",
+    "- Keep business logic in Java/OSGi services; HTL is presentation-only.",
+    "- Use Sling Models and OSGi Declarative Services annotations.",
+    "- Never use admin sessions; use service user mappings for system access.",
+    "- Do not hardcode secrets or credentials.",
+    "- Follow secure coding, accessibility, and performance best practices."
+  ].join("\n");
+}
 
 function loadAgentContext(filename) {
   if (agentContextCache[filename]) {
@@ -61,6 +169,7 @@ function createMockResponse(prompt, options = {}) {
   const { mode, fallbackContext = {} } = options;
   const topic = fallbackContext.topic || "General AEM";
   const question = fallbackContext.message || "No question supplied.";
+  const promptText = normalizePrompt(prompt).text;
 
   if (mode === "trainer") {
     return [
@@ -161,26 +270,45 @@ function createMockResponse(prompt, options = {}) {
     "",
     "### Prompt Preview",
     "```text",
-    prompt.slice(0, 1200),
+    promptText.slice(0, 1200),
     "```"
   ].join("\n");
 }
 
 async function askWithClaude(prompt) {
-  const { stdout, stderr } = await execFileAsync(
+  const normalizedPrompt = normalizePrompt(prompt);
+  const os = require("os");
+
+  const child = require("child_process").spawn(
     appConfig.ai.claudeCommand,
-    ["-p", prompt],
+    ["-p", "--model", "sonnet"],
     {
-      cwd: path.resolve(appConfig.repo.projectDir),
-      maxBuffer: 1024 * 1024
+      cwd: os.tmpdir(),      // neutral directory — avoids stale conversation context
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env }
     }
   );
 
-  if (stderr) {
-    logger.warn("Claude CLI wrote to stderr", { stderr });
-  }
+  // Write prompt to stdin and close
+  child.stdin.write(normalizedPrompt.text);
+  child.stdin.end();
 
-  return stdout.trim();
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (stderr) {
+        logger.warn("Claude CLI wrote to stderr", { stderr: stderr.trim() });
+      }
+      if (code !== 0) {
+        return reject(new Error(`Claude CLI exited with code ${code}: ${stderr.trim()}`));
+      }
+      resolve(stdout.trim());
+    });
+  });
 }
 
 async function askAI(prompt, options = {}) {
@@ -205,47 +333,165 @@ async function askAI(prompt, options = {}) {
 }
 
 function sanitizeComponentName(rawName) {
-  const stopWords = [
+  const stopWords = new Set([
     "create", "build", "scaffold", "generate", "make", "add", "new",
-    "component", "with", "below", "above", "following", "features",
-    "and", "the", "a", "an", "for", "that", "has", "having", "including",
-    "please", "i", "want", "need", "like", "would", "which", "who", "whose", "whom", "where", "when", "why", "how"
-  ];
+    "update", "modify", "enhance", "refactor", "fix", "edit", "extend",
+    "component", "components", "with", "below", "above", "following", "features",
+    "and", "the", "a", "an", "for", "that", "has", "have", "having", "including",
+    "please", "i", "want", "need", "like", "would", "should", "could", "can",
+    "which", "who", "whose", "whom", "where", "when", "why", "how",
+    "queries", "gets", "displays", "shows", "renders", "fetches", "retrieves",
+    "all", "each", "every", "some", "any", "this", "these", "those",
+    "under", "over", "from", "into", "onto", "upon", "about", "between",
+    "page", "pages", "path", "result", "results", "data", "content",
+    "on", "in", "at", "to", "of", "by", "is", "are", "it", "its", "be",
+    "authored", "configured", "displayed", "created", "built", "added"
+  ]);
 
-  // Only use the first valid noun-like word (skip stopwords and trailing 'which', 'that', etc.)
-  let words = rawName
+  // Strip everything after a clause boundary
+  const corePart = rawName
+    .split(/\s*[-:—]\s*|\s+(?:which|that|who|where|when|such as|like|including|having)\s+/i)[0];
+
+  // Extract meaningful words (keep first 2 for naming)
+  const words = corePart
     .replace(/[^a-zA-Z\s]/g, "")
     .split(/\s+/)
-    .filter((w) => w && !stopWords.includes(w.toLowerCase()));
+    .filter((w) => w && !stopWords.has(w.toLowerCase()))
+    .slice(0, 2);
 
-  // If the first word is still a stopword or not a valid identifier, fallback
-  let base = words[0] || "customComponent";
-  if (/^(which|that|with|who|whose|whom|where|when|why|how)$/i.test(base)) {
-    base = "customComponent";
+  if (words.length === 0) {
+    return { folderName: "customcomponent", className: "CustomComponent", jcrTitle: "Custom Component" };
   }
-  // Enforce camelCase and max length
-  const folderName = base.replace(/[^a-zA-Z]/g, "").toLowerCase().slice(0, 20) || "customcomponent";
-  const className = base.charAt(0).toUpperCase() + base.slice(1).toLowerCase() || "CustomComponent";
-  const jcrTitle = className.replace(/([A-Z])/g, ' $1').trim();
+
+  const folderName = words.join("").toLowerCase().slice(0, 20);
+  const className = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join("");
+  const jcrTitle = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
 
   return {
-    folderName,
-    className,
-    jcrTitle
+    folderName: folderName || "customcomponent",
+    className: className || "CustomComponent",
+    jcrTitle: jcrTitle || "Custom Component"
   };
 }
 
-function createMockBuilderResponse(componentName) {
-  const { folderName: lowerName, className: titleName } = sanitizeComponentName(componentName);
+/**
+ * Detect what type of AEM artifact the user is requesting.
+ * Returns: "component", "servlet", "service", "scheduler", "filter", "workflow", "listener"
+ */
+function detectArtifactType(message) {
+  const lower = message.toLowerCase();
+  // Order matters: check compound terms first (servlet filter → filter, not servlet)
+  if (/\bservlet\s*filter\b|\brequest\s*filter\b/.test(lower)) return "filter";
+  if (/\bfilter\b/.test(lower)) return "filter";
+  if (/\bscheduler\b|\bcron\b|\bscheduled\s+task\b/.test(lower)) return "scheduler";
+  if (/\bworkflow\b|\bworkflow\s*step\b|\bworkflow\s*process\b/.test(lower)) return "workflow";
+  if (/\bevent\s*listener\b|\bevent\s*handler\b|\bobservation\s*listener\b/.test(lower)) return "listener";
+  if (/\bservlet\b/.test(lower)) return "servlet";
+  if (/\bosgi\s*service\b|\bservice\s+class\b|\bservice\s+to\b|\bservice\s+for\b|\bservice\s+that\b/.test(lower)) return "service";
+  if (/\bsling\s*model\b/.test(lower)) return "model";
+  return "component";
+}
+
+/**
+ * Derive a clean class name from the user request based on artifact type.
+ * For "Create a servlet to generate sitemap.xml" → { className: "SitemapXml", type: "servlet" }
+ */
+function inferBuildIntent(message) {
+  const input = String(message || "");
+  const lower = input.toLowerCase();
+  const isUpdate = /(update|modify|enhance|refactor|fix|edit|extend)\b/.test(lower);
+  const isCreate = /(create|build|scaffold|generate|make|add|new)\b/.test(lower);
+  const mode = isUpdate && !isCreate ? "update" : "create";
+  const artifactType = detectArtifactType(input);
+
+  if (artifactType === "component") {
+    // "component named foo" or "component called foo"
+    const namedExplicit = input.match(/component\s+(?:named|called)\s+([a-zA-Z][a-zA-Z0-9 -_]+)/i);
+    // "foo bar component" (up to 3 words before "component")
+    const trailingMatch = input.match(/\b((?:[a-zA-Z]+\s+){0,2}[a-zA-Z]+)\s+component\b/i);
+    const explicitName = (namedExplicit?.[1] || trailingMatch?.[1] || input).trim();
+    const naming = sanitizeComponentName(explicitName);
+    return { mode, artifactType, ...naming };
+  }
+
+  // For non-component artifacts, derive class name differently
+  const artifactWord = artifactType; // "servlet", "service", etc.
+  const suffix = artifactType.charAt(0).toUpperCase() + artifactType.slice(1); // "Servlet", "Service"
+
+  // Remove the artifact type word and stop words to get the core concept
+  const conceptWords = input
+    .replace(/[^a-zA-Z\s]/g, "")
+    .split(/\s+/)
+    .filter((w) => {
+      const lw = w.toLowerCase();
+      return w && !["create", "build", "scaffold", "generate", "make", "add", "new",
+        "update", "modify", "enhance", "refactor", "fix", "a", "an", "the", "for",
+        "to", "that", "which", "this", "and", "or", "with", "from", "of", "in",
+        artifactWord, "osgi", "sling", "aem", "class"
+      ].includes(lw);
+    })
+    .slice(0, 3)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+
+  const baseName = conceptWords.length > 0 ? conceptWords.join("") : "Custom";
+  const className = baseName + suffix;
+  const folderName = baseName.toLowerCase();
+
+  return { mode, artifactType, folderName, className, jcrTitle: conceptWords.join(" ") || "Custom" };
+}
+
+function createMockBuilderResponse(name, artifactType) {
   const config = projectConfigService.get();
+  const javaPackage = projectConfigService.getJavaPackage();
+
+  if (artifactType && artifactType !== "component") {
+    // Non-component mock: generate a simple Java file
+    const pathMap = {
+      servlet: projectConfigService.getServletsPath(),
+      service: projectConfigService.getServicesPath(),
+      scheduler: projectConfigService.getServicesPath(),
+      filter: projectConfigService.getFiltersPath()
+    };
+    const subPackage = artifactType === "filter" ? "filters" : (artifactType === "servlet" ? "servlets" : "services");
+    const javaPath = (pathMap[artifactType] || projectConfigService.getServicesPath()) + `/${name}.java`;
+
+    return {
+      explanation: [
+        `## ${artifactType.charAt(0).toUpperCase() + artifactType.slice(1)}: ${name}`,
+        "",
+        "### What was created",
+        `- **${artifactType}** at \`${javaPath}\``,
+        "",
+        "### Next Steps",
+        "1. Deploy with `mvn clean install -PautoInstallBundle -pl core`",
+        "2. Verify the bundle is active in the Felix console",
+        `3. Test the ${artifactType} endpoint or behavior`
+      ].join("\n"),
+      files: [
+        {
+          path: javaPath,
+          content: [
+            `package ${javaPackage}.${subPackage};`,
+            "",
+            `// Mock ${artifactType} — switch AI_MODE to claude for real code generation`,
+            `public class ${name} {`,
+            "    // TODO: implement",
+            "}"
+          ].join("\n")
+        }
+      ]
+    };
+  }
+
+  // Component mock (existing behavior)
+  const { folderName: lowerName, className: titleName } = sanitizeComponentName(name);
   const basePath = `${projectConfigService.getComponentsPath()}/${lowerName}`;
   const modelPath = `${projectConfigService.getModelsPath()}/${titleName}Model.java`;
-  const javaPackage = projectConfigService.getJavaPackage();
   const componentGroup = projectConfigService.getComponentGroup();
 
   return {
     explanation: [
-      `## Component: ${componentName}`,
+      `## Component: ${name}`,
       "",
       "### What was created",
       `- **Component definition** with dialog at \`${basePath}/\``,
@@ -265,7 +511,7 @@ function createMockBuilderResponse(componentName) {
           '<?xml version="1.0" encoding="UTF-8"?>',
           '<jcr:root xmlns:cq="http://www.day.com/jcr/cq/1.0" xmlns:jcr="http://www.jcp.org/jcr/1.0"',
           '    jcr:primaryType="cq:Component"',
-          `    jcr:title="${componentName}"`,
+          `    jcr:title="${titleName}"`,
           `    componentGroup="${componentGroup}"/>`
         ].join("\n")
       },
@@ -353,98 +599,240 @@ function createMockBuilderResponse(componentName) {
   };
 }
 
-function buildComponentPrompt({ message, topic, repoContext }) {
+function buildFeaturePrompt({ message, topic, repoContext }) {
   const config = projectConfigService.get();
-  const componentsPath = projectConfigService.getComponentsPath();
-  const modelsPath = projectConfigService.getModelsPath();
   const javaPackage = projectConfigService.getJavaPackage();
-  const componentGroup = projectConfigService.getComponentGroup();
-  const agentContext = getTrainerContext();
+  const intent = inferBuildIntent(message);
+  const { mode, artifactType, folderName, className, jcrTitle } = intent;
 
-  const { folderName, className, jcrTitle } = sanitizeComponentName(message);
-
-  return [
-    "You are the Builder Agent for an AEM AI Trainer Platform.",
-    "The user wants to create or scaffold an AEM component in their project.",
-    "Follow the training pipeline and code generation rules described below.",
-    "",
-    "--- AGENT CONTEXT ---",
-    agentContext,
-    "--- END AGENT CONTEXT ---",
-    "",
-    "==========================================================",
-    "MANDATORY: USE THESE EXACT NAMES (already derived for you)",
-    "==========================================================",
-    "",
-    `Component folder name: ${folderName}`,
-    `Java class name:       ${className}Model`,
-    `jcr:title:             ${jcrTitle}`,
-    "",
-    "Use these exact names for all generated files:",
-    `  - Component folder: ${componentsPath}/${folderName}/`,
-    `  - HTL file:         ${componentsPath}/${folderName}/${folderName}.html`,
-    `  - Component XML:    ${componentsPath}/${folderName}/.content.xml`,
-    `  - Dialog:           ${componentsPath}/${folderName}/_cq_dialog/.content.xml`,
-    `  - Sling Model:      ${modelsPath}/${className}Model.java`,
-    `  - Test page:        ui.content/src/main/content/jcr_root/content/${config.appId}/us/en/trainer-test-${folderName}/.content.xml`,
-    "",
-    "DO NOT rename or modify these names. They are pre-validated.",
-    "==========================================================",
-    "",
+  // --- Project details block (shared across all artifact types) ---
+  const projectBlock = [
     "Project details:",
     `- Group ID: ${config.groupId}`,
-    `- App folder: ${config.appId}`,
-    `- Component group: ${componentGroup}`,
+    `- App ID: ${config.appId}`,
     `- Java package: ${javaPackage}`,
-    `- Components path: ${componentsPath}/`,
-    `- Sling Models path: ${modelsPath}/`,
+    `- Components path: ${projectConfigService.getComponentsPath()}/`,
+    `- Sling Models path: ${projectConfigService.getModelsPath()}/`,
+    `- Servlets path: ${projectConfigService.getServletsPath()}/`,
+    `- Services path: ${projectConfigService.getServicesPath()}/`,
+    `- Filters path: ${projectConfigService.getFiltersPath()}/`,
+    `- Component group: ${projectConfigService.getComponentGroup()}`
+  ].join("\n");
+
+  // --- Artifact-specific instructions ---
+  let artifactInstructions;
+
+  if (artifactType === "component") {
+    const componentsPath = projectConfigService.getComponentsPath();
+    const modelsPath = projectConfigService.getModelsPath();
+    artifactInstructions = [
+      `You are creating an AEM COMPONENT. Artifact type: component.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Component folder: ${folderName}`,
+      `Java class: ${className}Model`,
+      `jcr:title: ${jcrTitle}`,
+      "",
+      "Required files:",
+      `  - ${componentsPath}/${folderName}/.content.xml (component definition)`,
+      `  - ${componentsPath}/${folderName}/${folderName}.html (HTL template)`,
+      `  - ${componentsPath}/${folderName}/_cq_dialog/.content.xml (authoring dialog)`,
+      `  - ${modelsPath}/${className}Model.java (Sling Model)`,
+      `  - ui.content/src/main/content/jcr_root/content/${config.appId}/us/en/trainer-test-${folderName}/.content.xml (test page)`,
+      "",
+      "AEM Component Conventions:",
+      `- .content.xml: jcr:primaryType='cq:Component', jcr:title='${jcrTitle}', componentGroup='${projectConfigService.getComponentGroup()}'`,
+      `- HTL: <sly data-sly-use.model='${javaPackage}.models.${className}Model'/>, use data-sly-test for null checks`,
+      "- Dialog: sling:resourceType='cq/gui/components/authoring/dialog', field names start with './' and MUST match Sling Model @ValueMapValue field names (case-sensitive)",
+      `- Sling Model: package ${javaPackage}.models; @Model(adaptables=Resource.class, defaultInjectionStrategy=DefaultInjectionStrategy.OPTIONAL)`,
+      `- Java class: public class ${className}Model { ... }`,
+      "- If the component needs client-side logic or styles, also generate a clientlibs folder"
+    ].join("\n");
+  } else if (artifactType === "servlet") {
+    const servletsPath = projectConfigService.getServletsPath();
+    artifactInstructions = [
+      `You are creating an AEM SERVLET. Artifact type: servlet.`,
+      `DO NOT create any component files (.content.xml, HTL, dialog). Only create Java files.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Java class: ${className}`,
+      `File path: ${servletsPath}/${className}.java`,
+      "",
+      "Required files (ONLY these — no components, no HTL, no dialog):",
+      `  - ${servletsPath}/${className}.java`,
+      `  - If the servlet needs a helper service, also create: ${projectConfigService.getServicesPath()}/<ServiceName>.java`,
+      "",
+      "AEM Servlet Conventions:",
+      `- Package: ${javaPackage}.servlets`,
+      "- Use @SlingServletResourceTypes or @SlingServletPaths annotation (prefer resource types for security)",
+      "- Extend SlingSafeMethodsServlet (GET) or SlingAllMethodsServlet (GET+POST)",
+      "- Implement doGet() and/or doPost() methods",
+      "- Use @Reference or @OSGiService to inject services",
+      "- Set proper response content type (application/json, text/xml, text/html)",
+      "- Handle exceptions properly with appropriate HTTP status codes",
+      "- Use ResourceResolverFactory with service users, never admin sessions",
+      "- Add @Component annotation with service = Servlet.class",
+      "- Add proper SCR/OSGi metadata",
+      "",
+      "If the servlet requires a separate service layer (business logic), generate both:",
+      `  1. The servlet in ${javaPackage}.servlets`,
+      `  2. The service interface + impl in ${javaPackage}.services`
+    ].join("\n");
+  } else if (artifactType === "service") {
+    const servicesPath = projectConfigService.getServicesPath();
+    artifactInstructions = [
+      `You are creating an AEM OSGI SERVICE. Artifact type: service.`,
+      `DO NOT create any component files (.content.xml, HTL, dialog). Only create Java files.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Java class: ${className}`,
+      `Interface: ${servicesPath}/${className}.java`,
+      `Implementation: ${servicesPath}/impl/${className}Impl.java`,
+      "",
+      "Required files (ONLY these — no components):",
+      `  - ${servicesPath}/${className}.java (interface)`,
+      `  - ${servicesPath}/impl/${className}Impl.java (implementation)`,
+      "",
+      "AEM OSGi Service Conventions:",
+      `- Interface package: ${javaPackage}.services`,
+      `- Impl package: ${javaPackage}.services.impl`,
+      "- Use @Component(service = <InterfaceName>.class) on the implementation",
+      "- Use @Designate(ocd = ...) for configurable services with @ObjectClassDefinition",
+      "- Use @Reference for dependency injection",
+      "- Use @Activate, @Modified, @Deactivate lifecycle methods as needed",
+      "- Follow interface-impl pattern (interface defines contract, impl contains logic)",
+      "- Use proper logging with LoggerFactory.getLogger()",
+      "- Handle ResourceResolver lifecycle properly (close in finally blocks)"
+    ].join("\n");
+  } else if (artifactType === "scheduler") {
+    const servicesPath = projectConfigService.getServicesPath();
+    artifactInstructions = [
+      `You are creating an AEM SCHEDULER. Artifact type: scheduler.`,
+      `DO NOT create any component files. Only create Java files.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Java class: ${className}`,
+      `File path: ${servicesPath}/${className}.java`,
+      "",
+      "Required files:",
+      `  - ${servicesPath}/${className}.java`,
+      "",
+      "AEM Scheduler Conventions:",
+      `- Package: ${javaPackage}.services (schedulers are OSGi services)`,
+      "- Implement Runnable interface",
+      "- Use @Component(service = Runnable.class) annotation",
+      "- Use @Designate(ocd = ...) with @ObjectClassDefinition for configurable schedule",
+      "- Define scheduler.expression (cron) and scheduler.concurrent (false) in config annotation",
+      "- Use ResourceResolverFactory with service users for repository access",
+      "- Add proper logging for execution tracking",
+      "- Handle exceptions gracefully — schedulers must not crash"
+    ].join("\n");
+  } else if (artifactType === "filter") {
+    const filtersPath = projectConfigService.getFiltersPath();
+    artifactInstructions = [
+      `You are creating an AEM SERVLET FILTER. Artifact type: filter.`,
+      `DO NOT create any component files. Only create Java files.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Java class: ${className}`,
+      `File path: ${filtersPath}/${className}.java`,
+      "",
+      "Required files:",
+      `  - ${filtersPath}/${className}.java`,
+      "",
+      "AEM Filter Conventions:",
+      `- Package: ${javaPackage}.filters`,
+      "- Implement javax.servlet.Filter",
+      "- Use @Component with service = Filter.class",
+      "- Use @SlingServletFilter annotation with scope, pattern, or resourceTypes",
+      "- Set service.ranking for filter ordering",
+      "- Call chain.doFilter() to pass request downstream",
+      "- Handle both request and response phases as needed"
+    ].join("\n");
+  } else {
+    // workflow, listener, or anything else — let the AI figure out the specifics
+    const servicesPath = projectConfigService.getServicesPath();
+    artifactInstructions = [
+      `You are creating an AEM ${artifactType.toUpperCase()}. Artifact type: ${artifactType}.`,
+      `DO NOT create any component files (.content.xml, HTL, dialog) unless the user explicitly asks for a component.`,
+      `Only create the Java files needed for this ${artifactType}.`,
+      "",
+      "=== USE THESE EXACT NAMES ===",
+      `Java class: ${className}`,
+      `File path: ${servicesPath}/${className}.java`,
+      "",
+      `Generate ONLY the files required for a ${artifactType}. Use standard AEM/OSGi conventions.`,
+      `- Package: ${javaPackage}.services`,
+      "- Use proper OSGi annotations (@Component, @Reference, @Activate)",
+      "- Use ResourceResolverFactory with service users, never admin sessions"
+    ].join("\n");
+  }
+
+  const system = [
+    getAemPromptPreamble(
+      "Generate the requested AEM code following strict conventions and best practices."
+    ),
+    "You are an expert AEM architect generating production-ready code for a trainee.",
     "",
-    "AEM Code Conventions:",
-    "- Component .content.xml: jcr:primaryType='cq:Component', jcr:title='" + jcrTitle + "', componentGroup='" + componentGroup + "'",
-    "- HTL: <sly data-sly-use.model='" + javaPackage + ".models." + className + "Model'/>, use data-sly-test for null checks",
-    "- Dialog: sling:resourceType='cq/gui/components/authoring/dialog', field names start with './' and MUST match Sling Model @ValueMapValue field names exactly (case-sensitive)",
-    "- Sling Model: package " + javaPackage + ".models; @Model(adaptables=Resource.class, defaultInjectionStrategy=DefaultInjectionStrategy.OPTIONAL), use @ValueMapValue for properties",
-    "- Java class declaration: public class " + className + "Model { ... }",
+    mode === "update"
+      ? "You are UPDATING an existing artifact. Keep existing naming unless user explicitly requests a rename."
+      : "You are CREATING a new artifact.",
     "",
-    topic ? `Focus topic: ${topic}` : null,
-    `User request: ${message}`,
+    "CRITICAL: Only generate files appropriate for the artifact type.",
+    "- If the request is for a SERVLET: generate ONLY servlet Java files (and optionally a service). Do NOT generate HTL, dialog, .content.xml, or test pages.",
+    "- If the request is for a SERVICE: generate ONLY the service interface and implementation Java files.",
+    "- If the request is for a SCHEDULER: generate ONLY the scheduler Java file.",
+    "- If the request is for a FILTER: generate ONLY the filter Java file.",
+    "- If the request is for a COMPONENT: generate the full component set (HTL, dialog, .content.xml, Sling Model, test page).",
     "",
-    repoContext ? `Repository context:\n${repoContext}` : null,
+    artifactInstructions,
     "",
-    "Respond with ONLY valid JSON (no markdown fences, no extra text) in this exact format:",
-    '{',
-    '  "explanation": "Markdown explanation of what was created and next steps",',
-    '  "files": [',
-    '    { "path": "relative/path/from/project/root", "content": "file content" }',
-    '  ]',
-    '}',
+    projectBlock,
     "",
-    "Generate all necessary files: .content.xml, HTL template, _cq_dialog/.content.xml, and Sling Model .java file.",
-    "If the component needs client-side logic or styles, also generate a clientlibs folder.",
-    "Also generate a test page .content.xml so the trainee can see the component in AEM Author.",
-    "Use the project conventions and exact names above. Paths must be relative to the AEM project root."
+    "RESPONSE FORMAT (CRITICAL — you MUST follow this exactly):",
+    "- Your ENTIRE response must be a single JSON object. Nothing before it, nothing after it.",
+    "- No markdown fences, no commentary, no trailing explanation.",
+    "- If required details are missing, return: {\"needsClarification\":true,\"question\":\"...\"}",
+    "- Otherwise return:",
+    '  {"explanation":"Markdown explanation of what was created","files":[{"path":"relative/path/from/project/root","content":"full file content"}]}',
+    "",
+    "Paths must be relative to the AEM project root.",
+    "Respond with ONLY the JSON object, no other text."
   ]
     .filter(Boolean)
     .join("\n");
+
+  const user = [
+    topic ? `Focus topic: ${topic}` : null,
+    `User request: ${message}`,
+    `Artifact type: ${artifactType}`,
+    `Operation mode: ${mode}`,
+    toDataBlock("user_request", message, 1200),
+    repoContext ? toDataBlock("repository_context", repoContext, 4000) : null
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return { system, user, artifactType, intent };
 }
 
-function fixAIResponsePaths(result, prompt) {
+function fixAIResponsePaths(result, prompt, artifactType) {
   if (!result || !result.files) return result;
 
-  const userRequestMatch = prompt.match(/User request:\s*(.+)/i);
-  if (!userRequestMatch) return result;
+  // Only rewrite paths for components — servlets/services know their own names
+  if (artifactType && artifactType !== "component") return result;
 
-  const { folderName, className } = sanitizeComponentName(userRequestMatch[1]);
+  const userRequest = extractUserRequest(prompt);
+  if (!userRequest) return result;
+  const { folderName, className } = sanitizeComponentName(userRequest);
 
   result.files = result.files.map((file) => {
     let p = file.path;
 
-    // Fix Java file: ensure class name is properly PascalCased
-    if (p.endsWith(".java")) {
+    if (p.endsWith(".java") && p.includes("/models/")) {
       const javaFile = p.split("/").pop();
       if (javaFile.toLowerCase().includes(folderName) && javaFile !== `${className}Model.java`) {
         p = p.replace(javaFile, `${className}Model.java`);
-        // Also fix the class declaration inside the file content
         file.content = file.content
           .replace(/public\s+class\s+\w+Model/g, `public class ${className}Model`)
           .replace(/class\s+\w+Model/g, `class ${className}Model`);
@@ -458,39 +846,76 @@ function fixAIResponsePaths(result, prompt) {
   return result;
 }
 
-async function askAIForComponentFiles(prompt) {
+function validateBuilderResponse(parsed) {
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Builder response must be a JSON object");
+  }
+
+  if (parsed.needsClarification === true) {
+    if (!parsed.question || typeof parsed.question !== "string") {
+      throw new Error("Clarification response must include a question");
+    }
+    return;
+  }
+
+  if (!Array.isArray(parsed.files) || parsed.files.length === 0) {
+    throw new Error("Builder response must include a non-empty files array");
+  }
+
+  parsed.files.forEach((file, index) => {
+    if (!file || typeof file !== "object") {
+      throw new Error(`File at index ${index} is not an object`);
+    }
+    if (!file.path || typeof file.path !== "string") {
+      throw new Error(`File at index ${index} is missing a valid path`);
+    }
+    if (typeof file.content !== "string") {
+      throw new Error(`File at index ${index} is missing valid content`);
+    }
+  });
+}
+
+async function askAIForFeatureFiles(prompt, artifactType) {
   if (appConfig.ai.mode === "claude" || appConfig.ai.mode === "openai") {
     try {
       const raw = appConfig.ai.mode === "claude"
         ? await askWithClaude(prompt)
         : await askWithOpenAI(prompt);
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) {
+      const parsed = extractJSON(raw);
+      if (!parsed) {
+        logger.warn("AI raw response (first 500 chars)", { snippet: raw.slice(0, 500) });
         throw new Error("AI response did not contain valid JSON");
       }
-      const parsed = JSON.parse(jsonMatch[0]);
-      // Always sanitize and validate the component name
-      let aiName = "";
-      if (parsed.componentName && typeof parsed.componentName === "string") {
-        aiName = parsed.componentName;
-      } else if (parsed.files && parsed.files.length > 0) {
-        // Try to infer from file paths
-        const match = parsed.files[0].path.match(/components\/(\w+)/);
-        if (match) aiName = match[1];
+      validateBuilderResponse(parsed);
+      if (parsed.needsClarification) {
+        return parsed;
       }
-      if (!aiName) {
-        const componentMatch = prompt.match(/User request:\s*(.+)/i);
-        aiName = componentMatch
-          ? componentMatch[1].replace(/^(create|build|scaffold|make|generate)\s+(a\s+|an\s+|the\s+)?/i, "").replace(/\s+component$/i, "").trim()
-          : "sample";
+
+      // Only do component-specific name rewriting for components
+      if (artifactType === "component") {
+        let aiName = "";
+        if (parsed.componentName && typeof parsed.componentName === "string") {
+          aiName = parsed.componentName;
+        } else if (parsed.files && parsed.files.length > 0) {
+          const match = parsed.files[0].path.match(/components\/(\w+)/);
+          if (match) aiName = match[1];
+        }
+        if (!aiName) {
+          const userRequest = extractUserRequest(prompt);
+          aiName = inferBuildIntent(userRequest || "sample").folderName;
+        }
+        const { folderName, className } = sanitizeComponentName(aiName);
+        parsed.files = parsed.files.map(f => {
+          let newPath = f.path.replace(/components\/[^/]+/, `components/${folderName}`);
+          if (f.path.includes("/models/")) {
+            newPath = newPath.replace(/models\/[^/]+/, `models/${className}Model.java`);
+          }
+          return { ...f, path: newPath };
+        });
+        return fixAIResponsePaths(parsed, prompt, artifactType);
       }
-      const { folderName, className } = sanitizeComponentName(aiName);
-      // Rewrite all file paths and class names in the response
-      parsed.files = parsed.files.map(f => {
-        let newPath = f.path.replace(/components\/[^/]+/, `components/${folderName}`);
-        newPath = newPath.replace(/models\/[^/]+/, `models/${className}Model.java`);
-        return { ...f, path: newPath };
-      });
+
+      // For non-component artifacts, trust the AI paths (we gave it exact paths)
       return parsed;
     } catch (error) {
       logger.warn("AI model failed or returned invalid JSON for builder, falling back to mock", {
@@ -498,19 +923,19 @@ async function askAIForComponentFiles(prompt) {
       });
     }
   }
-  // fallback: sanitize name from prompt
-  const componentMatch = prompt.match(/User request:\s*(.+)/i);
-  const componentName = componentMatch
-    ? componentMatch[1].replace(/^(create|build|scaffold|make|generate)\s+(a\s+|an\s+|the\s+)?/i, "").replace(/\s+component$/i, "").trim()
-    : "sample";
-  const { folderName, className } = sanitizeComponentName(componentName);
-  return createMockBuilderResponse(className);
+  // fallback to mock
+  const userRequest = extractUserRequest(prompt);
+  const intent = inferBuildIntent(userRequest || "sample");
+  return createMockBuilderResponse(intent.className, intent.artifactType);
 }
 
 module.exports = {
   askAI,
-  buildComponentPrompt,
-  askAIForComponentFiles,
+  buildFeaturePrompt,
+  askAIForFeatureFiles,
+  inferBuildIntent,
   getTrainerContext,
-  getQAContext
+  getQAContext,
+  toDataBlock,
+  getAemPromptPreamble
 };
