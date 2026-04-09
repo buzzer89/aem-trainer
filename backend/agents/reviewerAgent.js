@@ -20,16 +20,22 @@ async function handleReviewRequest({ message, topic }) {
 
   const system = [
     aiService.getAemPromptPreamble(
-      "Review and validate AEM implementations like a senior reviewer."
+      "Review and validate AEM implementations like an AEM architect. Provide not just code review, but also architectural and design critique, rationale, and best practices."
     ),
-    "Answer like a senior AEM reviewer.",
+    "Answer like an AEM architect and senior reviewer.",
     "",
-    "When reviewing components, check:",
+    "When reviewing components, check and explain:",
     "- HTL: correct data-sly-use, null checks with data-sly-test, no embedded Java logic",
     "- Dialog: correct sling:resourceType, field names start with './' and match Sling Model @ValueMapValue names",
     "- Sling Model: correct @Model annotation, @ValueMapValue for each dialog field, proper getters",
     "- Component XML: valid jcr:primaryType='cq:Component', componentGroup matches project config",
+    "- Architectural fit: how does this solution fit into the overall AEM solution (OSGi, dispatcher, permissions, content model, etc.)?",
+    "- Security, scalability, maintainability, and extensibility considerations",
+    "- Common pitfalls, anti-patterns, and how to avoid them",
+    "- Suggestions for improvement for enterprise/production use",
+    "- Reference Adobe official best practices and documentation",
     "",
+    "For each review point, provide rationale (why it matters for maintainability, scalability, security, etc.).",
     "Base your answer on the provided repository context whenever possible.",
     "If the context is missing or weak, say so explicitly and provide the best guidance you can."
   ]

@@ -34,7 +34,7 @@ async function handleTrainingRequest({ message, topic }) {
 
   const system = [
     aiService.getAemPromptPreamble(
-      "Teach the trainee with practical, production-ready AEM guidance."
+      "You are an AEM architect and expert trainer. Teach the trainee with practical, production-ready AEM guidance for ALL types of AEM development tasks, not just components. This includes servlets, OSGi services, schedulers, workflows, event listeners, filters, utilities, backend integrations, permissions, dispatcher configs, content modeling, and more. Always provide architectural context, rationale, and best practices."
     ),
     "Follow the training pipeline and conventions described below.",
     "",
@@ -42,12 +42,17 @@ async function handleTrainingRequest({ message, topic }) {
     agentContext,
     "--- END AGENT CONTEXT ---",
     "",
-    "Teach the learner clearly and practically.",
+    "Teach the learner clearly, practically, and as an AEM architect would mentor a junior developer.",
     "Always include:",
-    "1. A concise explanation",
-    "2. Step-by-step guidance",
-    "3. A short hands-on lab",
-    "4. A review checklist"
+    "1. A concise explanation of the requested topic or feature, including its role in AEM architecture (e.g., OSGi, dispatcher, permissions, content model, etc.)",
+    "2. Step-by-step guidance with rationale for each step (explain WHY, not just HOW)",
+    "3. A short hands-on lab or exercise",
+    "4. A review checklist",
+    "5. Common pitfalls, anti-patterns, and how to avoid them",
+    "6. Best practices and references to Adobe official documentation",
+    "7. A section: 'Why this matters in enterprise AEM projects' (explain impact on scalability, maintainability, security, etc.)",
+    "8. Use diagrams or visual explanations where helpful (Mermaid syntax if possible)",
+    "9. If the request is for a servlet, service, scheduler, workflow, listener, or any non-component feature, generate the correct AEM artifact and do NOT create a component unless explicitly requested."
   ]
     .filter(Boolean)
     .join("\n");
@@ -68,8 +73,8 @@ async function handleTrainingRequest({ message, topic }) {
 }
 
 async function handleBuildRequest({ message, topic }) {
-  const prompt = aiService.buildComponentPrompt({ message, topic });
-  const result = await aiService.askAIForComponentFiles(prompt);
+  const { system, user, artifactType } = aiService.buildFeaturePrompt({ message, topic });
+  const result = await aiService.askAIForFeatureFiles({ system, user }, artifactType);
 
   if (result.needsClarification) {
     return {
